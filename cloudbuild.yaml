@@ -11,5 +11,20 @@ steps:
       - 'push'
       - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
 
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'update'
+      - 'ml-config-test-job'
+      - '--image'
+      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+      - '--region'
+      - 'us-central1'
+
+images:
+  - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+
 options:
   logging: CLOUD_LOGGING_ONLY
