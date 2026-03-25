@@ -3,28 +3,50 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$BUILD_ID'
       - '.'
 
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$BUILD_ID'
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'jobs'
-      - 'update'
-      - 'ml-config-test-job'
+      - 'deploy'
+      - 'oms-sync-orders-dev'
       - '--image'
-      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$BUILD_ID'
       - '--region'
-      - 'us-central1'
+      - 'southamerica-east1'
+      - '--service-account'
+      - 'ml-sheets-runner@oms-sheets-database.iam.gserviceaccount.com'
+      - '--tasks'
+      - '1'
+      - '--max-retries'
+      - '3'
+      - '--task-timeout'
+      - '10m'
+      - '--cpu'
+      - '1'
+      - '--memory'
+      - '512Mi'
+      - '--network'
+      - 'oms-vpc'
+      - '--subnet'
+      - 'oms-subnet-sa-east1'
+      - '--vpc-egress'
+      - 'private-ranges-only'
+      - '--set-env-vars'
+      - 'DB_HOST=10.181.0.3,DB_PORT=5432,DB_NAME=oms,DB_USER=oms_app,SYNC_COMMAND=ml_selftest'
+      - '--set-secrets'
+      - 'DB_PASSWORD=OMS_DB_PASSWORD:latest,ML_SELLER_ID=ml-user-id:latest,ML_CLIENT_ID=ml-client-id:latest,ML_CLIENT_SECRET=ml-client-secret:latest,ML_REFRESH_TOKEN=ml-refresh-token:latest'
 
 images:
-  - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/oms-sheets-database/oms-sheets-job/oms-image:$BUILD_ID'
 
 options:
   logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,633 @@
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+import psycopg
+import requests
+from psycopg.rows import dict_row
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+)
+
+logger = logging.getLogger("sync_orders")
+
+
+@dataclass(frozen=True)
+class SyncConfig:
+    seller_id: int
+    resource: str = "orders"
+    overlap_seconds: int = 300
+    lookback_days_first_run: int = 30
+    high_watermark_lag_seconds: int = 120
+
+    @classmethod
+    def from_env(cls) -> "SyncConfig":
+        seller_id_raw = os.getenv("ML_SELLER_ID")
+        if not seller_id_raw:
+            raise ValueError("Missing required env var: ML_SELLER_ID")
+
+        return cls(
+            seller_id=int(seller_id_raw),
+            resource=os.getenv("SYNC_RESOURCE", "orders"),
+            overlap_seconds=int(os.getenv("SYNC_OVERLAP_SECONDS", "300")),
+            lookback_days_first_run=int(os.getenv("SYNC_FIRST_RUN_LOOKBACK_DAYS", "30")),
+            high_watermark_lag_seconds=int(os.getenv("SYNC_HIGH_WATERMARK_LAG_SECONDS", "120")),
+        )
+
+
+@dataclass(frozen=True)
+class DbConfig:
+    host: str
+    port: int
+    dbname: str
+    user: str
+    password: str
+    connect_timeout: int = 10
+
+    @classmethod
+    def from_env(cls) -> "DbConfig":
+        host = os.getenv("DB_HOST")
+        dbname = os.getenv("DB_NAME")
+        user = os.getenv("DB_USER")
+        password = os.getenv("DB_PASSWORD")
+
+        missing = [
+            name
+            for name, value in {
+                "DB_HOST": host,
+                "DB_NAME": dbname,
+                "DB_USER": user,
+                "DB_PASSWORD": password,
+            }.items()
+            if not value
+        ]
+
+        if missing:
+            raise ValueError(f"Missing required DB env vars: {', '.join(missing)}")
+
+        return cls(
+            host=host,
+            port=int(os.getenv("DB_PORT", "5432")),
+            dbname=dbname,
+            user=user,
+            password=password,
+            connect_timeout=int(os.getenv("DB_CONNECT_TIMEOUT_SECONDS", "10")),
+        )
+
+
+@dataclass(frozen=True)
+class MlConfig:
+    client_id: str
+    client_secret: str
+    refresh_token: str
+    api_base_url: str = "https://api.mercadolibre.com"
+    request_timeout_seconds: int = 30
+
+    @classmethod
+    def from_env(cls) -> "MlConfig":
+        client_id = os.getenv("ML_CLIENT_ID")
+        client_secret = os.getenv("ML_CLIENT_SECRET")
+        refresh_token = os.getenv("ML_REFRESH_TOKEN")
+
+        missing = [
+            name
+            for name, value in {
+                "ML_CLIENT_ID": client_id,
+                "ML_CLIENT_SECRET": client_secret,
+                "ML_REFRESH_TOKEN": refresh_token,
+            }.items()
+            if not value
+        ]
+
+        if missing:
+            raise ValueError(f"Missing required ML env vars: {', '.join(missing)}")
+
+        return cls(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            api_base_url=os.getenv("ML_API_BASE_URL", "https://api.mercadolibre.com"),
+            request_timeout_seconds=int(os.getenv("ML_REQUEST_TIMEOUT_SECONDS", "30")),
+        )
+
+
+@dataclass(frozen=True)
+class SyncState:
+    resource: str
+    account_id: int
+    cursor_ts: datetime
+    overlap_seconds: int
+    status: str
+
+
+@dataclass(frozen=True)
+class SyncWindow:
+    from_ts: datetime
+    to_ts: datetime
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_ml_datetime(value: datetime) -> str:
+    value_utc = value.astimezone(timezone.utc)
+    return value_utc.isoformat(timespec="milliseconds")
+
+
+def get_db_connection() -> psycopg.Connection:
+    db = DbConfig.from_env()
+    return psycopg.connect(
+        host=db.host,
+        port=db.port,
+        dbname=db.dbname,
+        user=db.user,
+        password=db.password,
+        connect_timeout=db.connect_timeout,
+        row_factory=dict_row,
+    )
+
+
+def compute_sync_window(state: SyncState, cfg: SyncConfig) -> SyncWindow:
+    from_ts = state.cursor_ts - timedelta(seconds=state.overlap_seconds)
+    to_ts = utcnow() - timedelta(seconds=cfg.high_watermark_lag_seconds)
+
+    if from_ts >= to_ts:
+        raise ValueError(
+            f"Invalid sync window: from_ts={from_ts.isoformat()} >= to_ts={to_ts.isoformat()}"
+        )
+
+    return SyncWindow(from_ts=from_ts, to_ts=to_ts)
+
+
+def get_sync_state(cfg: SyncConfig) -> SyncState:
+    query = """
+        SELECT
+            resource,
+            account_id,
+            cursor_ts,
+            overlap_seconds,
+            status
+        FROM oms.sync_state
+        WHERE resource = %s
+          AND account_id = %s
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (cfg.resource, cfg.seller_id))
+            row = cur.fetchone()
+
+    if not row:
+        fallback_cursor = utcnow() - timedelta(days=cfg.lookback_days_first_run)
+        logger.warning(
+            "sync_state row not found for resource=%s seller_id=%s; using fallback cursor_ts=%s",
+            cfg.resource,
+            cfg.seller_id,
+            fallback_cursor.isoformat(),
+        )
+        return SyncState(
+            resource=cfg.resource,
+            account_id=cfg.seller_id,
+            cursor_ts=fallback_cursor,
+            overlap_seconds=cfg.overlap_seconds,
+            status="idle",
+        )
+
+    return SyncState(
+        resource=row["resource"],
+        account_id=row["account_id"],
+        cursor_ts=row["cursor_ts"],
+        overlap_seconds=row["overlap_seconds"],
+        status=row["status"],
+    )
+
+
+def mark_sync_running(cfg: SyncConfig, high_watermark: datetime) -> None:
+    query = """
+        UPDATE oms.sync_state
+        SET status = 'running',
+            last_attempt_at = NOW(),
+            last_high_watermark = %s,
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE resource = %s
+          AND account_id = %s
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (high_watermark, cfg.resource, cfg.seller_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Failed to mark sync_state running for resource={cfg.resource} seller_id={cfg.seller_id}"
+                )
+
+
+def mark_sync_success(cfg: SyncConfig, new_cursor_ts: datetime) -> None:
+    query = """
+        UPDATE oms.sync_state
+        SET status = 'idle',
+            cursor_ts = %s,
+            last_success_at = NOW(),
+            last_error = NULL,
+            updated_at = NOW()
+        WHERE resource = %s
+          AND account_id = %s
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (new_cursor_ts, cfg.resource, cfg.seller_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Failed to mark sync_state success for resource={cfg.resource} seller_id={cfg.seller_id}"
+                )
+
+
+def mark_sync_error(cfg: SyncConfig, error_message: str) -> None:
+    safe_error_message = error_message[:4000]
+
+    query = """
+        UPDATE oms.sync_state
+        SET status = 'error',
+            last_error = %s,
+            updated_at = NOW()
+        WHERE resource = %s
+          AND account_id = %s
+    """
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (safe_error_message, cfg.resource, cfg.seller_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Failed to mark sync_state error for resource={cfg.resource} seller_id={cfg.seller_id}"
+                )
+
+
+def get_ml_access_token() -> str:
+    ml = MlConfig.from_env()
+
+    response = requests.post(
+        f"{ml.api_base_url}/oauth/token",
+        headers={
+            "accept": "application/json",
+            "content-type": "application/x-www-form-urlencoded",
+        },
+        data={
+            "grant_type": "refresh_token",
+            "client_id": ml.client_id,
+            "client_secret": ml.client_secret,
+            "refresh_token": ml.refresh_token,
+        },
+        timeout=ml.request_timeout_seconds,
+    )
+    response.raise_for_status()
+
+    payload = response.json()
+    access_token = payload.get("access_token")
+    if not access_token:
+        raise RuntimeError("Mercado Libre token response did not include access_token")
+
+    return access_token
+
+
+def ml_get(
+    access_token: str,
+    path: str,
+    params: Optional[dict] = None,
+    extra_headers: Optional[dict] = None,
+) -> dict:
+    ml = MlConfig.from_env()
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "accept": "application/json",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    response = requests.get(
+        f"{ml.api_base_url}{path}",
+        headers=headers,
+        params=params or {},
+        timeout=ml.request_timeout_seconds,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def run_db_selftest(cfg: Optional[SyncConfig] = None) -> None:
+    cfg = cfg or SyncConfig.from_env()
+
+    logger.info("Starting db self-test for resource=%s seller_id=%s", cfg.resource, cfg.seller_id)
+
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    current_database() AS current_database,
+                    current_user AS current_user,
+                    NOW() AS db_now
+                """
+            )
+            row = cur.fetchone()
+
+    logger.info(
+        "DB self-test connected successfully: current_database=%s current_user=%s db_now=%s",
+        row["current_database"],
+        row["current_user"],
+        row["db_now"],
+    )
+
+    state = get_sync_state(cfg)
+    window = compute_sync_window(state, cfg)
+
+    logger.info(
+        "DB self-test loaded sync_state successfully: resource=%s account_id=%s status=%s cursor_ts=%s",
+        state.resource,
+        state.account_id,
+        state.status,
+        state.cursor_ts.isoformat(),
+    )
+
+    logger.info(
+        "DB self-test computed sync window successfully: from_ts=%s to_ts=%s",
+        window.from_ts.isoformat(),
+        window.to_ts.isoformat(),
+    )
+
+
+def run_ml_selftest(cfg: Optional[SyncConfig] = None) -> None:
+    cfg = cfg or SyncConfig.from_env()
+
+    logger.info("Starting ML self-test for seller_id=%s", cfg.seller_id)
+
+    access_token = get_ml_access_token()
+    logger.info("ML self-test obtained access token successfully")
+
+    me = ml_get(access_token, "/users/me")
+    logger.info(
+        "ML self-test /users/me ok: id=%s nickname=%s site_id=%s",
+        me.get("id"),
+        me.get("nickname"),
+        me.get("site_id"),
+    )
+
+    if str(me.get("id")) != str(cfg.seller_id):
+        raise RuntimeError(
+            f"ML self-test seller mismatch: users/me id={me.get('id')} does not match ML_SELLER_ID={cfg.seller_id}"
+        )
+
+    state = get_sync_state(cfg)
+    window = compute_sync_window(state, cfg)
+
+    sample = search_orders_incremental(
+        cfg,
+        window,
+        access_token=access_token,
+        page_limit=50,
+        max_results=1,
+    )
+    logger.info(
+        "ML self-test /orders/search ok: seller_id=%s from_ts=%s to_ts=%s sample_count=%s",
+        cfg.seller_id,
+        window.from_ts.isoformat(),
+        window.to_ts.isoformat(),
+        len(sample),
+    )
+
+    if not sample:
+        logger.info("ML self-test found no orders in window; skipping order detail validation")
+        return
+
+    first_order_id = int(sample[0]["id"])
+    order_detail = fetch_order_detail(first_order_id, access_token=access_token)
+
+    logger.info(
+        "ML self-test /orders/{id} ok: order_id=%s status=%s total_amount=%s order_items=%s",
+        order_detail.get("id"),
+        order_detail.get("status"),
+        order_detail.get("total_amount"),
+        len(order_detail.get("order_items", [])),
+    )
+
+
+def search_orders_incremental(
+    cfg: SyncConfig,
+    window: SyncWindow,
+    access_token: Optional[str] = None,
+    page_limit: int = 50,
+    max_results: Optional[int] = None,
+) -> list[dict]:
+    token = access_token or get_ml_access_token()
+
+    all_results: list[dict] = []
+    offset = 0
+    limit = max(1, min(page_limit, 50))
+
+    while True:
+        payload = ml_get(
+            token,
+            "/orders/search",
+            params={
+                "seller": cfg.seller_id,
+                "order.date_last_updated.from": format_ml_datetime(window.from_ts),
+                "order.date_last_updated.to": format_ml_datetime(window.to_ts),
+                "offset": offset,
+                "limit": limit,
+                "sort": "date_desc",
+            },
+        )
+
+        batch = payload.get("results", [])
+        if not isinstance(batch, list):
+            raise RuntimeError("Unexpected Mercado Libre /orders/search response: results is not a list")
+
+        all_results.extend(batch)
+
+        if max_results is not None and len(all_results) >= max_results:
+            return all_results[:max_results]
+
+        paging = payload.get("paging", {}) or {}
+        total = int(paging.get("total", len(all_results)))
+
+        if not batch or len(all_results) >= total:
+            break
+
+        offset += len(batch)
+
+    return all_results
+
+
+def fetch_order_detail(order_id: int, access_token: Optional[str] = None) -> dict:
+    token = access_token or get_ml_access_token()
+    return ml_get(token, f"/orders/{order_id}")
+
+
+def fetch_shipment_detail(shipment_id: int) -> Optional[dict]:
+    """
+    TODO:
+    - Llamar GET /shipments/{id}
+    - Usar header x-format-new: true
+    """
+    raise NotImplementedError("fetch_shipment_detail not implemented yet")
+
+
+def fetch_billing_info(order_id: int) -> Optional[dict]:
+    """
+    TODO:
+    - Llamar GET /orders/{id}/billing_info
+    """
+    raise NotImplementedError("fetch_billing_info not implemented yet")
+
+
+def upsert_user(user_payload: dict) -> None:
+    """
+    TODO:
+    - UPSERT en oms.users
+    """
+    raise NotImplementedError("upsert_user not implemented yet")
+
+
+def upsert_shipment(shipment_payload: dict) -> None:
+    """
+    TODO:
+    - UPSERT en oms.shipments
+    """
+    raise NotImplementedError("upsert_shipment not implemented yet")
+
+
+def upsert_order(order_payload: dict) -> None:
+    """
+    TODO:
+    - UPSERT en oms.orders
+    """
+    raise NotImplementedError("upsert_order not implemented yet")
+
+
+def upsert_order_item(order_id: int, item_payload: dict) -> None:
+    """
+    TODO:
+    - UPSERT en oms.order_items
+    """
+    raise NotImplementedError("upsert_order_item not implemented yet")
+
+
+def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
+    """
+    TODO:
+    - UPSERT en oms.billing_info
+    """
+    raise NotImplementedError("upsert_billing_info not implemented yet")
+
+
+def ensure_order_operations_row(order_id: int) -> None:
+    """
+    TODO:
+    - INSERT INTO oms.order_operations(order_id) ... ON CONFLICT DO NOTHING
+    """
+    raise NotImplementedError("ensure_order_operations_row not implemented yet")
+
+
+def run_sync(cfg: Optional[SyncConfig] = None) -> None:
+    cfg = cfg or SyncConfig.from_env()
+    logger.info("Starting sync scaffold for resource=%s seller_id=%s", cfg.resource, cfg.seller_id)
+
+    state = get_sync_state(cfg)
+    window = compute_sync_window(state, cfg)
+
+    logger.info(
+        "Computed sync window from_ts=%s to_ts=%s overlap_seconds=%s",
+        window.from_ts.isoformat(),
+        window.to_ts.isoformat(),
+        state.overlap_seconds,
+    )
+
+    mark_sync_running(cfg, window.to_ts)
+
+    orders = search_orders_incremental(cfg, window)
+    logger.info("Fetched %s incremental order candidates", len(orders))
+
+    for row in orders:
+        order_id = int(row["id"])
+        order_payload = fetch_order_detail(order_id)
+
+        buyer = order_payload.get("buyer")
+        if buyer:
+            upsert_user(buyer)
+
+        seller = order_payload.get("seller")
+        if seller:
+            upsert_user(seller)
+
+        shipment_id = (
+            order_payload.get("shipping", {}) or {}
+        ).get("id") or (
+            order_payload.get("shipment", {}) or {}
+        ).get("id")
+
+        if shipment_id:
+            shipment_payload = fetch_shipment_detail(int(shipment_id))
+            if shipment_payload:
+                upsert_shipment(shipment_payload)
+
+        upsert_order(order_payload)
+
+        for item in order_payload.get("order_items", []):
+            upsert_order_item(order_id, item)
+
+        billing_payload = fetch_billing_info(order_id)
+        if billing_payload:
+            upsert_billing_info(order_id, billing_payload)
+
+        ensure_order_operations_row(order_id)
+
+    mark_sync_success(cfg, window.to_ts)
+    logger.info("Sync scaffold finished successfully")
+
+
+def main() -> None:
+    cfg: Optional[SyncConfig] = None
+    command = os.getenv("SYNC_COMMAND", "run_sync").strip().lower()
+
+    try:
+        cfg = SyncConfig.from_env()
+
+        if command == "db_selftest":
+            run_db_selftest(cfg)
+            return
+
+        if command == "ml_selftest":
+            run_ml_selftest(cfg)
+            return
+
+        if command == "run_sync":
+            run_sync(cfg)
+            return
+
+        raise ValueError(f"Unsupported SYNC_COMMAND: {command}")
+    except NotImplementedError as exc:
+        logger.warning("Scaffold created, but implementation is still pending: %s", exc)
+        raise SystemExit(0)
+    except Exception as exc:
+        if cfg is not None and command == "run_sync":
+            try:
+                mark_sync_error(cfg, str(exc))
+            except Exception as mark_exc:
+                logger.warning("Failed to persist sync error state: %s", mark_exc)
+
+        logger.exception("Sync failed: %s", exc)
+        raise
+
+
+if __name__ == "__main__":
+    main()
