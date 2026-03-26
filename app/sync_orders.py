@@ -863,7 +863,10 @@ def upsert_shipment(shipment_payload: dict) -> None:
             )
 
 
-def upsert_order(order_payload: dict) -> None:
+def upsert_order(
+    order_payload: dict,
+    fallback_last_updated: object = None,
+) -> None:
     if not isinstance(order_payload, dict):
         raise ValueError("order_payload must be a dict")
 
@@ -879,9 +882,25 @@ def upsert_order(order_payload: dict) -> None:
     if date_created is None:
         raise ValueError("order_payload did not include date_created")
 
-    last_updated = parse_ml_datetime(order_payload.get("date_last_updated"))
+    primary_last_updated = order_payload.get("date_last_updated")
+    secondary_last_updated = order_payload.get("last_updated")
+    chosen_last_updated_raw = first_non_none(
+        primary_last_updated,
+        secondary_last_updated,
+        fallback_last_updated,
+    )
+    last_updated = parse_ml_datetime(chosen_last_updated_raw)
     if last_updated is None:
-        raise ValueError("order_payload did not include date_last_updated")
+        raise ValueError(
+            "order_payload did not include date_last_updated, last_updated, "
+            "or fallback_last_updated"
+        )
+
+    if primary_last_updated is None:
+        logger.warning(
+            "Order %s missing date_last_updated in detail payload; using fallback timestamp source",
+            order_id_raw,
+        )
 
     buyer_id = normalize_int(order_payload.get("buyer"))
     seller_id = normalize_int(order_payload.get("seller"))
@@ -1218,14 +1237,52 @@ def run_sync(cfg: Optional[SyncConfig] = None) -> None:
         state.overlap_seconds,
     )
 
+    max_orders_raw = os.getenv("SYNC_MAX_ORDERS_PER_RUN", "").strip()
+    max_orders_per_run: Optional[int] = None
+    if max_orders_raw:
+        parsed_max_orders = int(max_orders_raw)
+        if parsed_max_orders > 0:
+            max_orders_per_run = parsed_max_orders
+
+    page_limit = 50
+    if max_orders_per_run is not None:
+        page_limit = max(1, min(50, max_orders_per_run))
+        logger.info(
+            "SYNC_MAX_ORDERS_PER_RUN active: max_orders_per_run=%s page_limit=%s",
+            max_orders_per_run,
+            page_limit,
+        )
+
+    access_token = get_ml_access_token()
+    logger.info("Obtained Mercado Libre access token for run_sync")
+
     mark_sync_running(cfg, window.to_ts)
 
-    orders = search_orders_incremental(cfg, window)
+    orders = search_orders_incremental(
+        cfg,
+        window,
+        access_token=access_token,
+        page_limit=page_limit,
+        max_results=max_orders_per_run,
+    )
     logger.info("Fetched %s incremental order candidates", len(orders))
 
-    for row in orders:
+    success_cursor = window.to_ts
+
+    for index, row in enumerate(orders, start=1):
         order_id = int(row["id"])
-        order_payload = fetch_order_detail(order_id)
+
+        candidate_last_updated_raw = first_non_none(
+            row.get("date_last_updated"),
+            row.get("last_updated"),
+        )
+        candidate_last_updated = parse_ml_datetime(candidate_last_updated_raw)
+
+        if max_orders_per_run is not None and candidate_last_updated is not None:
+            if candidate_last_updated < success_cursor:
+                success_cursor = candidate_last_updated
+
+        order_payload = fetch_order_detail(order_id, access_token=access_token)
 
         buyer = order_payload.get("buyer")
         if buyer:
@@ -1242,24 +1299,41 @@ def run_sync(cfg: Optional[SyncConfig] = None) -> None:
         ).get("id")
 
         if shipment_id:
-            shipment_payload = fetch_shipment_detail(int(shipment_id))
+            shipment_payload = fetch_shipment_detail(
+                int(shipment_id),
+                access_token=access_token,
+            )
             if shipment_payload:
                 upsert_shipment(shipment_payload)
 
-        upsert_order(order_payload)
+        upsert_order(
+            order_payload,
+            fallback_last_updated=candidate_last_updated_raw,
+        )
 
         for item in order_payload.get("order_items", []):
             upsert_order_item(order_id, item)
 
-        billing_payload = fetch_billing_info(order_id)
+        billing_payload = fetch_billing_info(
+            order_id,
+            access_token=access_token,
+        )
         if billing_payload:
             upsert_billing_info(order_id, billing_payload)
 
         ensure_order_operations_row(order_id)
 
-    mark_sync_success(cfg, window.to_ts)
-    logger.info("Sync scaffold finished successfully")
+        if index % 10 == 0 or index == len(orders):
+            logger.info("Processed %s/%s order candidates", index, len(orders))
 
+    if max_orders_per_run is not None and orders:
+        logger.info(
+            "Capped run finished: advancing cursor conservatively to oldest processed candidate ts=%s",
+            success_cursor.isoformat(),
+        )
+
+    mark_sync_success(cfg, success_cursor)
+    logger.info("Sync scaffold finished successfully with cursor_ts=%s", success_cursor.isoformat())
 
 def main() -> None:
     cfg: Optional[SyncConfig] = None
