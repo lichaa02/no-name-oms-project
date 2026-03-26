@@ -1193,15 +1193,11 @@ def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
 
 
 def ensure_order_operations_row(order_id: int) -> None:
-    query = """
-        INSERT INTO oms.order_operations (order_id)
-        VALUES (%s)
-        ON CONFLICT (order_id) DO NOTHING
     """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (int(order_id),))
+    TODO:
+    - INSERT INTO oms.order_operations(order_id) ... ON CONFLICT DO NOTHING
+    """
+    raise NotImplementedError("ensure_order_operations_row not implemented yet")
 
 
 def run_sync(cfg: Optional[SyncConfig] = None) -> None:

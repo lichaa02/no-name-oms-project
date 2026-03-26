@@ -4,7 +4,6 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
 from typing import Optional
 
 import psycopg
@@ -569,128 +568,21 @@ def normalize_int(value: object) -> Optional[int]:
     return int(str(value).strip())
 
 
-def normalize_decimal(value: object) -> Optional[Decimal]:
-    if value is None:
-        return None
-
-    if isinstance(value, Decimal):
-        return value
-
-    if isinstance(value, bool):
-        return Decimal(int(value))
-
-    if isinstance(value, int):
-        return Decimal(value)
-
-    if isinstance(value, float):
-        return Decimal(str(value))
-
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if not cleaned:
-            return None
-        try:
-            return Decimal(cleaned)
-        except InvalidOperation as exc:
-            raise ValueError(f"Invalid decimal value: {value!r}") from exc
-
-    try:
-        return Decimal(str(value).strip())
-    except InvalidOperation as exc:
-        raise ValueError(f"Invalid decimal value: {value!r}") from exc
+def fetch_shipment_detail(shipment_id: int) -> Optional[dict]:
+    """
+    TODO:
+    - Llamar GET /shipments/{id}
+    - Usar header x-format-new: true
+    """
+    raise NotImplementedError("fetch_shipment_detail not implemented yet")
 
 
-def normalize_text(value: object) -> Optional[str]:
-    if value is None:
-        return None
-
-    if isinstance(value, (dict, list, tuple, set)):
-        return None
-
-    cleaned = str(value).strip()
-    return cleaned or None
-
-
-def first_non_none(*values: object) -> object:
-    for value in values:
-        if value is not None:
-            return value
-    return None
-
-
-def compose_full_name(*values: object) -> Optional[str]:
-    parts: list[str] = []
-
-    for value in values:
-        cleaned = normalize_text(value)
-        if cleaned:
-            parts.append(cleaned)
-
-    if not parts:
-        return None
-
-    return " ".join(parts)
-
-
-def extract_attribute_value(attributes: object, attribute_type: str) -> Optional[str]:
-    if not isinstance(attributes, list):
-        return None
-
-    target_type = attribute_type.strip().upper()
-
-    for attribute in attributes:
-        if not isinstance(attribute, dict):
-            continue
-
-        current_type = normalize_text(attribute.get("type"))
-        if not current_type or current_type.upper() != target_type:
-            continue
-
-        return normalize_text(attribute.get("value"))
-
-    return None
-
-
-def fetch_shipment_detail(
-    shipment_id: int,
-    access_token: Optional[str] = None,
-) -> Optional[dict]:
-    token = access_token or get_ml_access_token()
-    payload = ml_get(
-        token,
-        f"/shipments/{int(shipment_id)}",
-        extra_headers={"x-format-new": "true"},
-    )
-
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"Unexpected Mercado Libre /shipments/{shipment_id} response: payload is not an object"
-        )
-
-    return payload
-
-
-def fetch_billing_info(
-    order_id: int,
-    access_token: Optional[str] = None,
-) -> Optional[dict]:
-    token = access_token or get_ml_access_token()
-
-    try:
-        payload = ml_get(token, f"/orders/{int(order_id)}/billing_info")
-    except requests.HTTPError as exc:
-        response = exc.response
-        if response is not None and response.status_code == 404:
-            logger.info("No billing info found for order_id=%s", order_id)
-            return None
-        raise
-
-    if not isinstance(payload, dict):
-        raise RuntimeError(
-            f"Unexpected Mercado Libre /orders/{order_id}/billing_info response: payload is not an object"
-        )
-
-    return payload or None
+def fetch_billing_info(order_id: int) -> Optional[dict]:
+    """
+    TODO:
+    - Llamar GET /orders/{id}/billing_info
+    """
+    raise NotImplementedError("fetch_billing_info not implemented yet")
 
 
 def upsert_user(user_payload: dict) -> None:
@@ -749,118 +641,11 @@ def upsert_user(user_payload: dict) -> None:
 
 
 def upsert_shipment(shipment_payload: dict) -> None:
-    if not isinstance(shipment_payload, dict):
-        raise ValueError("shipment_payload must be a dict")
-
-    shipment_id_raw = shipment_payload.get("id")
-    if shipment_id_raw is None:
-        raise ValueError("shipment_payload did not include id")
-
-    status = shipment_payload.get("status")
-    if not status:
-        raise ValueError("shipment_payload did not include status")
-
-    logistic = shipment_payload.get("logistic")
-    if not isinstance(logistic, dict):
-        logistic = {}
-
-    source = shipment_payload.get("source")
-    if not isinstance(source, dict):
-        source = {}
-
-    shipping_option = shipment_payload.get("shipping_option")
-    if not isinstance(shipping_option, dict):
-        shipping_option = {}
-
-    lead_time = shipment_payload.get("lead_time")
-    if not isinstance(lead_time, dict):
-        lead_time = {}
-
-    shipping_method = lead_time.get("shipping_method")
-    if not isinstance(shipping_method, dict):
-        shipping_method = {}
-
-    site_id = first_non_none(
-        shipment_payload.get("site_id"),
-        source.get("site_id"),
-    )
-    mode = first_non_none(
-        shipment_payload.get("mode"),
-        logistic.get("mode"),
-    )
-    logistic_type = first_non_none(
-        shipment_payload.get("logistic_type"),
-        logistic.get("type"),
-    )
-    tracking_number = shipment_payload.get("tracking_number")
-    tracking_method = first_non_none(
-        shipment_payload.get("tracking_method"),
-        shipping_method.get("type"),
-    )
-    shipping_option_id = first_non_none(
-        normalize_int(shipping_option.get("id")),
-        normalize_int(lead_time.get("option_id")),
-    )
-    shipping_option_name = first_non_none(
-        shipping_option.get("name"),
-        shipping_method.get("name"),
-    )
-    date_created = parse_ml_datetime(shipment_payload.get("date_created"))
-    last_updated = parse_ml_datetime(shipment_payload.get("last_updated"))
-
-    query = """
-        INSERT INTO oms.shipments (
-            shipment_id,
-            site_id,
-            mode,
-            logistic_type,
-            status,
-            substatus,
-            tracking_number,
-            tracking_method,
-            shipping_option_id,
-            shipping_option_name,
-            date_created,
-            last_updated,
-            raw_json
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (shipment_id) DO UPDATE
-        SET site_id = COALESCE(EXCLUDED.site_id, oms.shipments.site_id),
-            mode = COALESCE(EXCLUDED.mode, oms.shipments.mode),
-            logistic_type = COALESCE(EXCLUDED.logistic_type, oms.shipments.logistic_type),
-            status = EXCLUDED.status,
-            substatus = COALESCE(EXCLUDED.substatus, oms.shipments.substatus),
-            tracking_number = COALESCE(EXCLUDED.tracking_number, oms.shipments.tracking_number),
-            tracking_method = COALESCE(EXCLUDED.tracking_method, oms.shipments.tracking_method),
-            shipping_option_id = COALESCE(EXCLUDED.shipping_option_id, oms.shipments.shipping_option_id),
-            shipping_option_name = COALESCE(EXCLUDED.shipping_option_name, oms.shipments.shipping_option_name),
-            date_created = COALESCE(EXCLUDED.date_created, oms.shipments.date_created),
-            last_updated = COALESCE(EXCLUDED.last_updated, oms.shipments.last_updated),
-            raw_json = EXCLUDED.raw_json,
-            updated_at = NOW()
     """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                query,
-                (
-                    int(shipment_id_raw),
-                    site_id,
-                    mode,
-                    logistic_type,
-                    status,
-                    shipment_payload.get("substatus"),
-                    tracking_number,
-                    tracking_method,
-                    shipping_option_id,
-                    shipping_option_name,
-                    date_created,
-                    last_updated,
-                    Jsonb(shipment_payload),
-                ),
-            )
+    TODO:
+    - UPSERT en oms.shipments
+    """
+    raise NotImplementedError("upsert_shipment not implemented yet")
 
 
 def upsert_order(order_payload: dict) -> None:
@@ -946,262 +731,27 @@ def upsert_order(order_payload: dict) -> None:
 
 
 def upsert_order_item(order_id: int, item_payload: dict) -> None:
-    if not isinstance(item_payload, dict):
-        raise ValueError("item_payload must be a dict")
-
-    item = item_payload.get("item")
-    if not isinstance(item, dict):
-        raise ValueError("item_payload did not include item dict")
-
-    item_id_raw = item.get("id")
-    if item_id_raw is None:
-        raise ValueError("item_payload.item did not include id")
-
-    item_id = str(item_id_raw).strip()
-    if not item_id:
-        raise ValueError("item_payload.item id is empty")
-
-    quantity = normalize_int(item_payload.get("quantity"))
-    if quantity is None:
-        raise ValueError("item_payload did not include quantity")
-
-    unit_price = normalize_decimal(item_payload.get("unit_price"))
-    if unit_price is None:
-        raise ValueError("item_payload did not include unit_price")
-
-    variation_id = normalize_int(item.get("variation_id"))
-    full_unit_price = normalize_decimal(item_payload.get("full_unit_price"))
-    sale_fee = normalize_decimal(item_payload.get("sale_fee"))
-
-    query = """
-        INSERT INTO oms.order_items (
-            order_id,
-            item_id,
-            variation_id,
-            title,
-            category_id,
-            seller_sku,
-            quantity,
-            unit_price,
-            full_unit_price,
-            sale_fee,
-            listing_type_id,
-            raw_json
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT ON CONSTRAINT uq_order_items_order_variation DO UPDATE
-        SET variation_id = EXCLUDED.variation_id,
-            title = COALESCE(EXCLUDED.title, oms.order_items.title),
-            category_id = COALESCE(EXCLUDED.category_id, oms.order_items.category_id),
-            seller_sku = COALESCE(EXCLUDED.seller_sku, oms.order_items.seller_sku),
-            quantity = EXCLUDED.quantity,
-            unit_price = EXCLUDED.unit_price,
-            full_unit_price = COALESCE(EXCLUDED.full_unit_price, oms.order_items.full_unit_price),
-            sale_fee = COALESCE(EXCLUDED.sale_fee, oms.order_items.sale_fee),
-            listing_type_id = COALESCE(EXCLUDED.listing_type_id, oms.order_items.listing_type_id),
-            raw_json = EXCLUDED.raw_json,
-            updated_at = NOW()
     """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                query,
-                (
-                    int(order_id),
-                    item_id,
-                    variation_id,
-                    item.get("title"),
-                    item.get("category_id"),
-                    item.get("seller_sku"),
-                    quantity,
-                    unit_price,
-                    full_unit_price,
-                    sale_fee,
-                    item_payload.get("listing_type_id"),
-                    Jsonb(item_payload),
-                ),
-            )
+    TODO:
+    - UPSERT en oms.order_items
+    """
+    raise NotImplementedError("upsert_order_item not implemented yet")
 
 
 def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
-    if not isinstance(billing_payload, dict):
-        raise ValueError("billing_payload must be a dict")
-
-    identification = billing_payload.get("identification")
-    if not isinstance(identification, dict):
-        identification = {}
-
-    taxpayer_type_obj = billing_payload.get("taxpayer_type")
-    if not isinstance(taxpayer_type_obj, dict):
-        taxpayer_type_obj = {}
-
-    buyer_info = billing_payload.get("buyer_info")
-    if not isinstance(buyer_info, dict):
-        buyer_info = {}
-
-    receiver_address = billing_payload.get("receiver_address")
-    if not isinstance(receiver_address, dict):
-        receiver_address = {}
-
-    if not receiver_address:
-        address = billing_payload.get("address")
-        if isinstance(address, dict):
-            receiver_address = address
-
-    city_obj = receiver_address.get("city")
-    if not isinstance(city_obj, dict):
-        city_obj = {}
-
-    state_obj = receiver_address.get("state")
-    if not isinstance(state_obj, dict):
-        state_obj = {}
-
-    country_obj = receiver_address.get("country")
-    if not isinstance(country_obj, dict):
-        country_obj = {}
-
-    attributes = billing_payload.get("attributes")
-
-    doc_type = first_non_none(
-        normalize_text(billing_payload.get("doc_type")),
-        normalize_text(identification.get("type")),
-        extract_attribute_value(attributes, "DOC_TYPE"),
-    )
-
-    doc_number = first_non_none(
-        normalize_text(billing_payload.get("doc_number")),
-        normalize_text(identification.get("number")),
-        extract_attribute_value(attributes, "DOC_NUMBER"),
-    )
-
-    taxpayer_type = first_non_none(
-        normalize_text(billing_payload.get("taxpayer_type")),
-        normalize_text(taxpayer_type_obj.get("description")),
-        normalize_text(taxpayer_type_obj.get("id")),
-        extract_attribute_value(attributes, "TAXPAYER_TYPE"),
-    )
-
-    billing_name = first_non_none(
-        normalize_text(billing_payload.get("billing_name")),
-        normalize_text(buyer_info.get("billing_name")),
-        compose_full_name(billing_payload.get("name"), billing_payload.get("last_name")),
-        compose_full_name(buyer_info.get("name"), buyer_info.get("last_name")),
-        normalize_text(billing_payload.get("business_name")),
-        normalize_text(buyer_info.get("business_name")),
-    )
-
-    address_line = first_non_none(
-        normalize_text(receiver_address.get("address_line")),
-        normalize_text(billing_payload.get("address_line")),
-    )
-
-    street_name = first_non_none(
-        normalize_text(receiver_address.get("street_name")),
-        normalize_text(billing_payload.get("street_name")),
-    )
-
-    street_number = first_non_none(
-        normalize_text(receiver_address.get("street_number")),
-        normalize_text(billing_payload.get("street_number")),
-    )
-
-    city = first_non_none(
-        normalize_text(receiver_address.get("city_name")),
-        normalize_text(city_obj.get("name")),
-        normalize_text(receiver_address.get("city")),
-        normalize_text(billing_payload.get("city")),
-    )
-
-    state = first_non_none(
-        normalize_text(state_obj.get("name")),
-        normalize_text(state_obj.get("code")),
-        normalize_text(receiver_address.get("state_name")),
-        normalize_text(receiver_address.get("state")),
-        normalize_text(billing_payload.get("state")),
-    )
-
-    country = first_non_none(
-        normalize_text(country_obj.get("name")),
-        normalize_text(country_obj.get("id")),
-        normalize_text(receiver_address.get("country")),
-        normalize_text(receiver_address.get("country_id")),
-        normalize_text(billing_payload.get("country")),
-        normalize_text(billing_payload.get("country_id")),
-    )
-
-    zip_code = first_non_none(
-        normalize_text(receiver_address.get("zip_code")),
-        normalize_text(billing_payload.get("zip_code")),
-    )
-
-    query = """
-        INSERT INTO oms.billing_info (
-            order_id,
-            doc_type,
-            doc_number,
-            taxpayer_type,
-            billing_name,
-            address_line,
-            street_name,
-            street_number,
-            city,
-            state,
-            country,
-            zip_code,
-            raw_json,
-            fetched_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        ON CONFLICT (order_id) DO UPDATE
-        SET doc_type = COALESCE(EXCLUDED.doc_type, oms.billing_info.doc_type),
-            doc_number = COALESCE(EXCLUDED.doc_number, oms.billing_info.doc_number),
-            taxpayer_type = COALESCE(EXCLUDED.taxpayer_type, oms.billing_info.taxpayer_type),
-            billing_name = COALESCE(EXCLUDED.billing_name, oms.billing_info.billing_name),
-            address_line = COALESCE(EXCLUDED.address_line, oms.billing_info.address_line),
-            street_name = COALESCE(EXCLUDED.street_name, oms.billing_info.street_name),
-            street_number = COALESCE(EXCLUDED.street_number, oms.billing_info.street_number),
-            city = COALESCE(EXCLUDED.city, oms.billing_info.city),
-            state = COALESCE(EXCLUDED.state, oms.billing_info.state),
-            country = COALESCE(EXCLUDED.country, oms.billing_info.country),
-            zip_code = COALESCE(EXCLUDED.zip_code, oms.billing_info.zip_code),
-            raw_json = EXCLUDED.raw_json,
-            fetched_at = NOW(),
-            updated_at = NOW()
     """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                query,
-                (
-                    int(order_id),
-                    doc_type,
-                    doc_number,
-                    taxpayer_type,
-                    billing_name,
-                    address_line,
-                    street_name,
-                    street_number,
-                    city,
-                    state,
-                    country,
-                    zip_code,
-                    Jsonb(billing_payload),
-                ),
-            )
+    TODO:
+    - UPSERT en oms.billing_info
+    """
+    raise NotImplementedError("upsert_billing_info not implemented yet")
 
 
 def ensure_order_operations_row(order_id: int) -> None:
-    query = """
-        INSERT INTO oms.order_operations (order_id)
-        VALUES (%s)
-        ON CONFLICT (order_id) DO NOTHING
     """
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(query, (int(order_id),))
+    TODO:
+    - INSERT INTO oms.order_operations(order_id) ... ON CONFLICT DO NOTHING
+    """
+    raise NotImplementedError("ensure_order_operations_row not implemented yet")
 
 
 def run_sync(cfg: Optional[SyncConfig] = None) -> None:
