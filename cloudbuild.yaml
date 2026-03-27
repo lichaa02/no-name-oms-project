@@ -75,7 +75,7 @@ steps:
       - '--vpc-egress'
       - 'private-ranges-only'
       - '--set-env-vars'
-      - 'DB_HOST=10.181.0.3,DB_PORT=5432,DB_NAME=oms,DB_USER=oms_app,SYNC_COMMAND=run_claims_sync,CLAIMS_LOOKBACK_DAYS=60,CLAIMS_SEARCH_PAGE_LIMIT=30'
+      - 'DB_HOST=10.181.0.3,DB_PORT=5432,DB_NAME=oms,DB_USER=oms_app,SYNC_COMMAND=run_claims_sync,CLAIMS_LOOKBACK_DAYS=60,CLAIMS_SEARCH_PAGE_LIMIT=30,CLAIMS_SEARCH_SORT=last_updated:desc,SYNC_MAX_CLAIMS_PER_RUN=500'
       - '--set-secrets'
       - 'DB_PASSWORD=OMS_DB_PASSWORD:latest,ML_SELLER_ID=ml-user-id:latest,ML_CLIENT_ID=ml-client-id:latest,ML_CLIENT_SECRET=ml-client-secret:latest,ML_REFRESH_TOKEN=ml-refresh-token:latest'
 
