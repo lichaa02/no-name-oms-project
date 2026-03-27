@@ -176,7 +176,7 @@ def get_sync_state(cfg: SyncConfig) -> SyncState:
             cursor_ts,
             overlap_seconds,
             status
-        FROM oms.sync_state
+        FROM oms.meli_sync_state
         WHERE resource = %s
           AND account_id = %s
     """
@@ -213,7 +213,7 @@ def get_sync_state(cfg: SyncConfig) -> SyncState:
 
 def mark_sync_running(cfg: SyncConfig, high_watermark: datetime) -> None:
     query = """
-        UPDATE oms.sync_state
+        UPDATE oms.meli_sync_state
         SET status = 'running',
             last_attempt_at = NOW(),
             last_high_watermark = %s,
@@ -234,7 +234,7 @@ def mark_sync_running(cfg: SyncConfig, high_watermark: datetime) -> None:
 
 def mark_sync_success(cfg: SyncConfig, new_cursor_ts: datetime) -> None:
     query = """
-        UPDATE oms.sync_state
+        UPDATE oms.meli_sync_state
         SET status = 'idle',
             cursor_ts = %s,
             last_success_at = NOW(),
@@ -257,7 +257,7 @@ def mark_sync_error(cfg: SyncConfig, error_message: str) -> None:
     safe_error_message = error_message[:4000]
 
     query = """
-        UPDATE oms.sync_state
+        UPDATE oms.meli_sync_state
         SET status = 'error',
             last_error = %s,
             updated_at = NOW()
@@ -706,7 +706,7 @@ def upsert_user(user_payload: dict) -> None:
     alternative_phone = normalize_phone(user_payload.get("alternative_phone"))
 
     query = """
-        INSERT INTO oms.users (
+        INSERT INTO oms.meli_users (
             user_id,
             nickname,
             first_name,
@@ -719,13 +719,13 @@ def upsert_user(user_payload: dict) -> None:
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (user_id) DO UPDATE
-        SET nickname = COALESCE(EXCLUDED.nickname, oms.users.nickname),
-            first_name = COALESCE(EXCLUDED.first_name, oms.users.first_name),
-            last_name = COALESCE(EXCLUDED.last_name, oms.users.last_name),
-            email = COALESCE(EXCLUDED.email, oms.users.email),
-            phone = COALESCE(EXCLUDED.phone, oms.users.phone),
-            alternative_phone = COALESCE(EXCLUDED.alternative_phone, oms.users.alternative_phone),
-            site_id = COALESCE(EXCLUDED.site_id, oms.users.site_id),
+        SET nickname = COALESCE(EXCLUDED.nickname, oms.meli_users.nickname),
+            first_name = COALESCE(EXCLUDED.first_name, oms.meli_users.first_name),
+            last_name = COALESCE(EXCLUDED.last_name, oms.meli_users.last_name),
+            email = COALESCE(EXCLUDED.email, oms.meli_users.email),
+            phone = COALESCE(EXCLUDED.phone, oms.meli_users.phone),
+            alternative_phone = COALESCE(EXCLUDED.alternative_phone, oms.meli_users.alternative_phone),
+            site_id = COALESCE(EXCLUDED.site_id, oms.meli_users.site_id),
             raw_json = EXCLUDED.raw_json,
             updated_at = NOW()
     """
@@ -809,7 +809,7 @@ def upsert_shipment(shipment_payload: dict) -> None:
     last_updated = parse_ml_datetime(shipment_payload.get("last_updated"))
 
     query = """
-        INSERT INTO oms.shipments (
+        INSERT INTO oms.meli_shipments (
             shipment_id,
             site_id,
             mode,
@@ -826,17 +826,17 @@ def upsert_shipment(shipment_payload: dict) -> None:
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (shipment_id) DO UPDATE
-        SET site_id = COALESCE(EXCLUDED.site_id, oms.shipments.site_id),
-            mode = COALESCE(EXCLUDED.mode, oms.shipments.mode),
-            logistic_type = COALESCE(EXCLUDED.logistic_type, oms.shipments.logistic_type),
+        SET site_id = COALESCE(EXCLUDED.site_id, oms.meli_shipments.site_id),
+            mode = COALESCE(EXCLUDED.mode, oms.meli_shipments.mode),
+            logistic_type = COALESCE(EXCLUDED.logistic_type, oms.meli_shipments.logistic_type),
             status = EXCLUDED.status,
-            substatus = COALESCE(EXCLUDED.substatus, oms.shipments.substatus),
-            tracking_number = COALESCE(EXCLUDED.tracking_number, oms.shipments.tracking_number),
-            tracking_method = COALESCE(EXCLUDED.tracking_method, oms.shipments.tracking_method),
-            shipping_option_id = COALESCE(EXCLUDED.shipping_option_id, oms.shipments.shipping_option_id),
-            shipping_option_name = COALESCE(EXCLUDED.shipping_option_name, oms.shipments.shipping_option_name),
-            date_created = COALESCE(EXCLUDED.date_created, oms.shipments.date_created),
-            last_updated = COALESCE(EXCLUDED.last_updated, oms.shipments.last_updated),
+            substatus = COALESCE(EXCLUDED.substatus, oms.meli_shipments.substatus),
+            tracking_number = COALESCE(EXCLUDED.tracking_number, oms.meli_shipments.tracking_number),
+            tracking_method = COALESCE(EXCLUDED.tracking_method, oms.meli_shipments.tracking_method),
+            shipping_option_id = COALESCE(EXCLUDED.shipping_option_id, oms.meli_shipments.shipping_option_id),
+            shipping_option_name = COALESCE(EXCLUDED.shipping_option_name, oms.meli_shipments.shipping_option_name),
+            date_created = COALESCE(EXCLUDED.date_created, oms.meli_shipments.date_created),
+            last_updated = COALESCE(EXCLUDED.last_updated, oms.meli_shipments.last_updated),
             raw_json = EXCLUDED.raw_json,
             updated_at = NOW()
     """
@@ -910,7 +910,7 @@ def upsert_order(
         shipment_id = normalize_int((order_payload.get("shipment") or {}).get("id"))
 
     query = """
-        INSERT INTO oms.orders (
+        INSERT INTO oms.meli_orders (
             order_id,
             site_id,
             pack_id,
@@ -927,17 +927,17 @@ def upsert_order(
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (order_id) DO UPDATE
-        SET site_id = COALESCE(EXCLUDED.site_id, oms.orders.site_id),
-            pack_id = COALESCE(EXCLUDED.pack_id, oms.orders.pack_id),
+        SET site_id = COALESCE(EXCLUDED.site_id, oms.meli_orders.site_id),
+            pack_id = COALESCE(EXCLUDED.pack_id, oms.meli_orders.pack_id),
             status = EXCLUDED.status,
-            status_detail = COALESCE(EXCLUDED.status_detail, oms.orders.status_detail),
+            status_detail = COALESCE(EXCLUDED.status_detail, oms.meli_orders.status_detail),
             date_created = EXCLUDED.date_created,
             last_updated = EXCLUDED.last_updated,
-            total_amount = COALESCE(EXCLUDED.total_amount, oms.orders.total_amount),
-            currency_id = COALESCE(EXCLUDED.currency_id, oms.orders.currency_id),
-            buyer_id = COALESCE(EXCLUDED.buyer_id, oms.orders.buyer_id),
-            seller_id = COALESCE(EXCLUDED.seller_id, oms.orders.seller_id),
-            shipment_id = COALESCE(EXCLUDED.shipment_id, oms.orders.shipment_id),
+            total_amount = COALESCE(EXCLUDED.total_amount, oms.meli_orders.total_amount),
+            currency_id = COALESCE(EXCLUDED.currency_id, oms.meli_orders.currency_id),
+            buyer_id = COALESCE(EXCLUDED.buyer_id, oms.meli_orders.buyer_id),
+            seller_id = COALESCE(EXCLUDED.seller_id, oms.meli_orders.seller_id),
+            shipment_id = COALESCE(EXCLUDED.shipment_id, oms.meli_orders.shipment_id),
             raw_json = EXCLUDED.raw_json,
             updated_at = NOW()
     """
@@ -993,7 +993,7 @@ def upsert_order_item(order_id: int, item_payload: dict) -> None:
     sale_fee = normalize_decimal(item_payload.get("sale_fee"))
 
     query = """
-        INSERT INTO oms.order_items (
+        INSERT INTO oms.meli_order_items (
             order_id,
             item_id,
             variation_id,
@@ -1008,16 +1008,16 @@ def upsert_order_item(order_id: int, item_payload: dict) -> None:
             raw_json
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT ON CONSTRAINT uq_order_items_order_variation DO UPDATE
+        ON CONFLICT ON CONSTRAINT uq_meli_order_items_order_variation DO UPDATE
         SET variation_id = EXCLUDED.variation_id,
-            title = COALESCE(EXCLUDED.title, oms.order_items.title),
-            category_id = COALESCE(EXCLUDED.category_id, oms.order_items.category_id),
-            seller_sku = COALESCE(EXCLUDED.seller_sku, oms.order_items.seller_sku),
+            title = COALESCE(EXCLUDED.title, oms.meli_order_items.title),
+            category_id = COALESCE(EXCLUDED.category_id, oms.meli_order_items.category_id),
+            seller_sku = COALESCE(EXCLUDED.seller_sku, oms.meli_order_items.seller_sku),
             quantity = EXCLUDED.quantity,
             unit_price = EXCLUDED.unit_price,
-            full_unit_price = COALESCE(EXCLUDED.full_unit_price, oms.order_items.full_unit_price),
-            sale_fee = COALESCE(EXCLUDED.sale_fee, oms.order_items.sale_fee),
-            listing_type_id = COALESCE(EXCLUDED.listing_type_id, oms.order_items.listing_type_id),
+            full_unit_price = COALESCE(EXCLUDED.full_unit_price, oms.meli_order_items.full_unit_price),
+            sale_fee = COALESCE(EXCLUDED.sale_fee, oms.meli_order_items.sale_fee),
+            listing_type_id = COALESCE(EXCLUDED.listing_type_id, oms.meli_order_items.listing_type_id),
             raw_json = EXCLUDED.raw_json,
             updated_at = NOW()
     """
@@ -1155,7 +1155,7 @@ def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
     )
 
     query = """
-        INSERT INTO oms.billing_info (
+        INSERT INTO oms.meli_billing_info (
             order_id,
             doc_type,
             doc_number,
@@ -1173,17 +1173,17 @@ def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (order_id) DO UPDATE
-        SET doc_type = COALESCE(EXCLUDED.doc_type, oms.billing_info.doc_type),
-            doc_number = COALESCE(EXCLUDED.doc_number, oms.billing_info.doc_number),
-            taxpayer_type = COALESCE(EXCLUDED.taxpayer_type, oms.billing_info.taxpayer_type),
-            billing_name = COALESCE(EXCLUDED.billing_name, oms.billing_info.billing_name),
-            address_line = COALESCE(EXCLUDED.address_line, oms.billing_info.address_line),
-            street_name = COALESCE(EXCLUDED.street_name, oms.billing_info.street_name),
-            street_number = COALESCE(EXCLUDED.street_number, oms.billing_info.street_number),
-            city = COALESCE(EXCLUDED.city, oms.billing_info.city),
-            state = COALESCE(EXCLUDED.state, oms.billing_info.state),
-            country = COALESCE(EXCLUDED.country, oms.billing_info.country),
-            zip_code = COALESCE(EXCLUDED.zip_code, oms.billing_info.zip_code),
+        SET doc_type = COALESCE(EXCLUDED.doc_type, oms.meli_billing_info.doc_type),
+            doc_number = COALESCE(EXCLUDED.doc_number, oms.meli_billing_info.doc_number),
+            taxpayer_type = COALESCE(EXCLUDED.taxpayer_type, oms.meli_billing_info.taxpayer_type),
+            billing_name = COALESCE(EXCLUDED.billing_name, oms.meli_billing_info.billing_name),
+            address_line = COALESCE(EXCLUDED.address_line, oms.meli_billing_info.address_line),
+            street_name = COALESCE(EXCLUDED.street_name, oms.meli_billing_info.street_name),
+            street_number = COALESCE(EXCLUDED.street_number, oms.meli_billing_info.street_number),
+            city = COALESCE(EXCLUDED.city, oms.meli_billing_info.city),
+            state = COALESCE(EXCLUDED.state, oms.meli_billing_info.state),
+            country = COALESCE(EXCLUDED.country, oms.meli_billing_info.country),
+            zip_code = COALESCE(EXCLUDED.zip_code, oms.meli_billing_info.zip_code),
             raw_json = EXCLUDED.raw_json,
             fetched_at = NOW(),
             updated_at = NOW()
@@ -1213,7 +1213,7 @@ def upsert_billing_info(order_id: int, billing_payload: dict) -> None:
 
 def ensure_order_operations_row(order_id: int) -> None:
     query = """
-        INSERT INTO oms.order_operations (order_id)
+        INSERT INTO oms.meli_order_operations (order_id)
         VALUES (%s)
         ON CONFLICT (order_id) DO NOTHING
     """

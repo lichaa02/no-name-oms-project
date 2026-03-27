@@ -107,7 +107,7 @@ def _claims_sync_config(base_cfg: Optional[SyncConfig] = None) -> SyncConfig:
 def ensure_claims_sync_state(cfg: SyncConfig) -> None:
     fallback_cursor = utcnow() - timedelta(days=cfg.lookback_days_first_run)
     query = """
-        INSERT INTO oms.sync_state (
+        INSERT INTO oms.meli_sync_state (
             resource,
             account_id,
             cursor_ts,
@@ -404,7 +404,7 @@ def order_exists(order_id: Optional[int]) -> bool:
 
     query = """
         SELECT 1
-        FROM oms.orders
+        FROM oms.meli_orders
         WHERE order_id = %s
         LIMIT 1
     """
@@ -491,7 +491,7 @@ def upsert_claim(claim_payload: dict) -> None:
         resource_id = order_id
 
     query = """
-        INSERT INTO oms.claims (
+        INSERT INTO oms.meli_claims (
             claim_id,
             order_id,
             resource,
@@ -510,18 +510,18 @@ def upsert_claim(claim_payload: dict) -> None:
         )
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (claim_id) DO UPDATE
-        SET order_id = COALESCE(EXCLUDED.order_id, oms.claims.order_id),
+        SET order_id = COALESCE(EXCLUDED.order_id, oms.meli_claims.order_id),
             resource = EXCLUDED.resource,
-            resource_id = COALESCE(EXCLUDED.resource_id, oms.claims.resource_id),
+            resource_id = COALESCE(EXCLUDED.resource_id, oms.meli_claims.resource_id),
             status = EXCLUDED.status,
             claim_type = EXCLUDED.claim_type,
-            stage = COALESCE(EXCLUDED.stage, oms.claims.stage),
-            parent_claim_id = COALESCE(EXCLUDED.parent_claim_id, oms.claims.parent_claim_id),
-            reason_id = COALESCE(EXCLUDED.reason_id, oms.claims.reason_id),
-            fulfilled = COALESCE(EXCLUDED.fulfilled, oms.claims.fulfilled),
-            quantity_type = COALESCE(EXCLUDED.quantity_type, oms.claims.quantity_type),
-            site_id = COALESCE(EXCLUDED.site_id, oms.claims.site_id),
-            date_created = COALESCE(EXCLUDED.date_created, oms.claims.date_created),
+            stage = COALESCE(EXCLUDED.stage, oms.meli_claims.stage),
+            parent_claim_id = COALESCE(EXCLUDED.parent_claim_id, oms.meli_claims.parent_claim_id),
+            reason_id = COALESCE(EXCLUDED.reason_id, oms.meli_claims.reason_id),
+            fulfilled = COALESCE(EXCLUDED.fulfilled, oms.meli_claims.fulfilled),
+            quantity_type = COALESCE(EXCLUDED.quantity_type, oms.meli_claims.quantity_type),
+            site_id = COALESCE(EXCLUDED.site_id, oms.meli_claims.site_id),
+            date_created = COALESCE(EXCLUDED.date_created, oms.meli_claims.date_created),
             last_updated = EXCLUDED.last_updated,
             raw_json = EXCLUDED.raw_json,
             updated_at = NOW()
@@ -670,7 +670,7 @@ def run_claims_sync(cfg: Optional[SyncConfig] = None) -> None:
                 order_id = _extract_order_id(claim_detail, resource_name, resource_id)
                 if not order_exists(order_id):
                     logger.warning(
-                        "Skipping claim_id=%s because related order_id=%s does not exist yet in oms.orders",
+                        "Skipping claim_id=%s because related order_id=%s does not exist yet in oms.meli_orders",
                         claim_id,
                         order_id,
                     )
